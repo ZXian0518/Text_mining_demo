@@ -1,0 +1,179 @@
+setwd('/Users/huangzongxian/Desktop/R/101/12 Text-Mining processing')
+rm(list = ls())
+dir()
+library(stringr)
+library(knitr)
+library(tidyverse)
+library(dplyr)
+library(jiebaR) # for string segment
+library(ggplot2) # for plotting word frequencies
+library(wordcloud2) # wordclouds
+library(Rwordseg) # for string segment
+library(tm)
+library(tidytext)
+library(topicmodels)
+
+# load data
+load('data.Rdata')
+str(data)
+head(data)
+data$content <- data$內容
+data$author <- data$作者
+data$content <- gsub("<p>","",data$content) # 去除空格
+data$content <- gsub("\n","",data$content) # 去除空格
+docs <- as.character(data$content)
+
+# setting segment environment
+cutter <- worker(type = 'tag', bylines = T) # type = c("mix", "query", "hmm", "mp", "tag", "full") 
+# setting white & black list
+white <- c('同志', '黃國昌', '聯盟', '公投案', '伴侶盟', '愛心碼') 
+new_user_word(cutter, white)
+Stop_words <- c('陳', '路', '有', '是', '里')
+find.string <- paste(Stop_words, collapse = "|")
+find.string
+
+# string segment processing 
+text_wb <- sapply(cutter[docs], function(x){
+        index = names(x) %in% c("n","nr","nr1","nr2","nrj","nrf","ns","nsf","nt","nz","nl","ng",
+                                'v','vn')
+        x[index]
+        }) # select only 'noun'
+text_wb <- sapply(text_wb, function(x){
+        paste(x, collapse = " ")
+})
+text_wb <- sapply(text_wb, function(x){
+        gsub(pattern = find.string,
+             replacement = '',
+             x)}) # remove the black list's strings 
+
+
+# set tidy_text format
+text_df <- data_frame(doc.id = 1:nrow(data), author = data$author, text = text_wb, 
+                      pos = data$正面強度, neg = data$負面強度)
+text_df <- text_df[!nchar(text_df$text) == 0,] # remove empty rows
+
+
+# term freq and wordcloud
+author_words <- text_df %>%
+        unnest_tokens(word, text) %>%  
+        count(author, word, sort = TRUE)
+
+d <- data.frame(author = author_words$author, 
+                word = author_words$word,
+                freq = author_words$n) # data.frame of term freq
+txt_freq <- cbind(as.character(d$word), d$freq) %>% as.data.frame()
+txt_freq$V2 <- txt_freq$V2 %>% as.character() %>% as.numeric()
+wordcloud2(filter(txt_freq,V2 >1), 
+           minSize = 2, fontFamily = "Microsoft YaHei", size = 1)
+
+# term frequency and tf-idf analysis
+author_words <- text_df %>%
+                unnest_tokens(word, text) %>%  
+                count(author, word, sort = TRUE) %>%
+                ungroup() %>%
+                bind_tf_idf(word, author, n)
+total_words <- author_words %>%
+                group_by(author) %>%
+                summarize(total = sum(n))
+author_words <- left_join(author_words, total_words)
+author_words # tf-idf with different group
+
+
+
+# tf-idf plot
+author_words %>%
+        select(-total) %>%
+        arrange(desc(tf_idf)) %>%
+        mutate(word = factor(word, levels = rev(unique(word)))) %>%
+        group_by(author) %>%
+        top_n(10) %>%
+        ungroup %>%
+        ggplot(aes(word, tf_idf, fill = author)) +
+        geom_col(show.legend = FALSE) +
+        labs(x = NULL, y = "同婚粉專發文tf-idf") +
+        facet_wrap(~author, ncol = 2, scales = "free") +
+        coord_flip() +
+        theme(text = element_text(family="黑體-繁 中黑"))
+
+# convert tidy_text into the document term matrix
+ap_dtm <- author_words %>% 
+                cast_dtm(author, word, n)
+ap_tdm <- author_words %>%
+                cast_tdm(word, author, n)
+
+inspect(ap_dtm)
+inspect(ap_tdm)
+
+# correlation between term
+findAssocs(ap_dtm, c("公投"), corlimit = 0.9)[[1]][1:10]
+
+# correaltion between author
+as.matrix(ap_tdm) %>% cor() 
+
+# math of findAssocs()
+sub_data <-  c("", "word1", "word1 word2","word1 word2 word3","word1 word2 word3 word4","word1 word2 word3 word4 word5") 
+dtm <- DocumentTermMatrix(VCorpus(VectorSource(sub_data)))
+as.matrix(dtm)
+findAssocs(dtm, "word1", 0) 
+cor(as.matrix(dtm)[,"word1"], as.matrix(dtm)[,"word2"])
+#0.6324555
+cor(as.matrix(dtm)[,"word1"], as.matrix(dtm)[,"word3"])
+#0.4472136
+
+# SVD analysis
+tdm.tfidf <- weightTfIdf(ap_tdm)
+res <- svd(tdm.tfidf) 
+nrow(res$u)
+ncol(res$v)
+datau <- data.frame(res$u[,2:3]) 
+datav <- data.frame(res$v[,2:3])
+ggplot() +
+        geom_point(data = datav, aes(X1, X2), size=2, color ='red') + 
+        theme(text = element_text(family="黑體-繁 中黑")) +
+        geom_text(data = datav, aes(X1, X2), label = 1:nrow(datav), vjust=1.5) +
+        ggtitle('SVD analysis')
+colnames(as.matrix(tdm.tfidf))
+# with documents
+doc_words <- text_df[1:500,] %>%
+        unnest_tokens(word, text) %>% 
+        count(doc.id, word, sort = TRUE) %>%
+        ungroup() %>%
+        bind_tf_idf(word, doc.id, n)
+doc_tdm <- doc_words %>%
+        cast_tdm(word, doc.id, n)
+inspect(doc_tdm)
+tdm.tfidf <- weightTfIdf(doc_tdm)
+res <- svd(tdm.tfidf) 
+nrow(res$u)
+ncol(res$v)
+datau <- data.frame(res$u[,2:3]) 
+datav <- data.frame(res$v[,2:3])
+ggplot() +
+        geom_point(data = datav, aes(X1, X2), size=2, color ='red') + 
+        theme(text = element_text(family="黑體-繁 中黑")) +
+        geom_text(data = datav, aes(X1, X2), label = 1:nrow(datav), vjust=1.5) +
+        ggtitle('SVD analysis')
+# those different: page 415 & page 479
+text_df[415, 'text'] 
+text_df[479, 'text']
+
+# LDA analysis
+ap_lda <- LDA(ap_dtm, k = 4, control = list(seed = 1234)) # k = number of topics
+ap_topics <- tidy(ap_lda, matrix = "beta")
+ap_top_terms <- ap_topics %>%
+        group_by(topic) %>%
+        top_n(10, beta) %>%
+        ungroup() %>%
+        arrange(topic, -beta)
+# LAD plot
+ap_top_terms %>%
+        mutate(term = reorder_within(term, beta, topic)) %>%
+        ggplot(aes(term, beta, fill = factor(topic))) +
+        geom_col(show.legend = FALSE) +
+        facet_wrap(~ topic, scales = "free") +
+        coord_flip() +
+        scale_x_reordered() +
+        theme(text = element_text(family="黑體-繁 中黑"))
+
+# SVM analysis
+# https://rpubs.com/skydome20/R-Note14-SVM-SVR
